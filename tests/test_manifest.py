@@ -9,7 +9,7 @@ def sample() -> Manifest:
         app_version="1.0",
         platform="linux/amd64",
         created_at="2026-11-08T00:00:00Z",
-        copydock_version="0.0.1",
+        copydock_version="0.1.0",
         images=[
             ImageEntry("sample-backend:1.0", ["backend"], "sha256:abc", None, True, 123),
             ImageEntry("caddy:2.8", ["caddy"], "sha256:def", "caddy@sha256:123", False, 456),
