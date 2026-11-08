@@ -51,9 +51,26 @@ def pull(ref: str, platform: str) -> None:
     run(["pull", "--platform", platform, ref], f"Pulling {ref}")
 
 
-def inspect_image(ref: str) -> dict:
-    return json.loads(run(["image", "inspect", ref], f"Inspecting {ref}"))[0]
+def _with_platform(prefix: list[str], rest: list[str], platform: str, what: str) -> str:
+    """Run `docker <prefix> --platform P <rest>`.
+
+    Docker 25+ keeps several platforms under one tag, and without --platform shows or saves the
+    variant matching THIS machine, which is wrong when packaging for another CPU type. Older Docker
+    keeps one platform per tag and does not know the flag; fall back to the plain command only
+    when the flag itself is unknown, never on other errors.
+    """
+    try:
+        return run([*prefix, "--platform", platform, *rest], what)
+    except CopyDockError as e:
+        if "unknown flag" not in str(e):
+            raise
+        return run([*prefix, *rest], what)
 
 
-def save(refs: list[str], dest: Path) -> None:
-    run(["save", "-o", str(dest), *refs], "Saving images")
+def inspect_image(ref: str, platform: str) -> dict:
+    out = _with_platform(["image", "inspect"], [ref], platform, f"Inspecting {ref}")
+    return json.loads(out)[0]
+
+
+def save(refs: list[str], dest: Path, platform: str) -> None:
+    _with_platform(["save"], ["-o", str(dest), *refs], platform, "Saving images")

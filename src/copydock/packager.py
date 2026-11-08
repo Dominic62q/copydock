@@ -244,7 +244,7 @@ def package_project(
                              platform, args, b.get("target"))  # fmt: skip
             else:
                 docker.pull(ref, platform)
-            info = docker.inspect_image(ref)
+            info = docker.inspect_image(ref, platform)
             got = f"{info.get('Os')}/{info.get('Architecture')}"
             if got != platform:
                 raise CopyDockError(
@@ -275,7 +275,7 @@ def package_project(
 
         with ui.step("Saving images") as s:
             tar_path = staging / "images" / "images.tar"
-            docker.save([i.reference for i in images], tar_path)
+            docker.save([i.reference for i in images], tar_path, platform)
             s.detail = ui.human_size(tar_path.stat().st_size)
 
         with ui.step("Writing deployment files") as s:
