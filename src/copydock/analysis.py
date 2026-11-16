@@ -123,10 +123,38 @@ def _relative(path: Path, root: Path) -> str:
     return str(path.resolve().relative_to(root.resolve()))
 
 
+def _bind_findings(source: Path, root: Path) -> list[Finding]:
+    """Inspect the complete copy set without following any symlinks."""
+    findings = []
+    pending = [source]
+    try:
+        while pending:
+            path = pending.pop()
+            rel = path.relative_to(root)
+            if path.is_symlink():
+                findings.append(Finding(
+                    "error", f"Symlink {rel} in bind mount {source} cannot be bundled. "
+                    "Replace it with a regular project file or directory.", "bind-symlink",
+                ))
+                continue
+            if path.name.startswith(".env") or path.suffix in _SECRET_FILE_HINTS:
+                findings.append(Finding(
+                    "warning", f"Bind-mounted path {rel} looks like it may hold secrets. "
+                    "Check it before bundling.", "secret-file",
+                ))
+            if path.is_dir():
+                pending.extend(path.iterdir())
+    except OSError as exc:
+        raise CopyDockError(f"Could not inspect bind mount {source}: {exc}") from exc
+    return findings
+
+
 def analyze(config: dict, raw_text: str, project: Path, compose_file: str) -> Report:
     report = Report(project=str(project), compose_file=compose_file)
     root = project.resolve()
     project_name = config.get("name") or root.name.lower()
+    mounts: dict[Path, str] = {}
+    builds: dict[str, tuple[str, object]] = {}
 
     # Required variables are found in the raw text: the resolved config does not list them.
     # Limitation: variables used only in `include:`d or `extends:`d files are not seen.
@@ -153,6 +181,13 @@ def analyze(config: dict, raw_text: str, project: Path, compose_file: str) -> Re
 
         build = svc.get("build")
         if build:
+            if image in builds and builds[image][1] != build:
+                report.findings.append(Finding(
+                    "error", f"Services '{builds[image][0]}' and '{name}' use image '{image}' "
+                    "with conflicting build definitions. Use distinct image names or the same build.",
+                ))
+            else:
+                builds[image] = (name, build)
             context = Path(build["context"] if isinstance(build, dict) else build)
             for key in _UNSUPPORTED_BUILD_KEYS & set(build if isinstance(build, dict) else ()):
                 report.findings.append(
@@ -202,11 +237,18 @@ def analyze(config: dict, raw_text: str, project: Path, compose_file: str) -> Re
                 else:
                     rel = _relative(source, root)
                     info.bind_mounts.append(rel)
-                    if source.name.startswith(".env") or source.suffix in _SECRET_FILE_HINTS:
-                        report.findings.append(
-                            Finding("warning", f"{name}: bind mount {rel} looks like it may "
-                                    "hold secrets. Check it before bundling.", "secret-file")
-                        )  # fmt: skip
+                    resolved = source.resolve()
+                    for previous, owner in mounts.items():
+                        if resolved != previous and (
+                            resolved in previous.parents or previous in resolved.parents
+                        ):
+                            report.findings.append(Finding(
+                                "error", f"{name}: bind mount {rel} overlaps with "
+                                f"{owner}: {previous.relative_to(root)}. "
+                                "Mount only the parent directory or use disjoint sources.",
+                            ))
+                    mounts[resolved] = name
+                    report.findings.extend(_bind_findings(source, root))
 
         if svc.get("env_file"):
             report.findings.append(

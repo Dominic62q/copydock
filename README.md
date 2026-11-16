@@ -71,8 +71,13 @@ Options: `--check`, `--non-interactive`, `--env-file PATH`.
   not tampering: compare the `.sha256` file over a channel you trust.
 - It rejects Compose features it cannot package safely, with a clear message: external volumes or
   networks, `secrets:`, `configs:`, `env_file`, bind mounts outside the project, variable build
-  args. Files that look like secrets (`.env`, `.pem`, `.key`) block packaging unless you pass
-  `--include-secret-files`.
+  args. Secret-looking paths (`.env*`, `.pem`, `.key`, `.p12`, `.pfx`), including paths nested
+  inside mounted directories, block packaging unless you pass `--include-secret-files`.
+  This is filename-based detection, not a scan of file contents or image layers.
+- Symlinks in bind-mounted trees are rejected, even with `--include-secret-files`. Replace
+  them with regular project files or directories. Overlapping bind sources are rejected;
+  mount only the parent directory or use disjoint sources. Repeating the same source is allowed.
+- Services sharing an image name must use identical build definitions, or distinct image names.
 - One CPU type per bundle.
 
 External services still need internet. Packaging an app does not make an SMS provider, for

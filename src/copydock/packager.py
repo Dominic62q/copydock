@@ -28,7 +28,7 @@ from pathlib import Path
 import yaml
 
 from copydock import __version__, docker, ui
-from copydock.analysis import Finding, analyze, find_compose_file, load_config
+from copydock.analysis import Finding, _bind_findings, analyze, find_compose_file, load_config
 from copydock.errors import CopyDockError
 from copydock.manifest import ImageEntry, Manifest
 
@@ -134,11 +134,20 @@ def bundle_conf(m: Manifest) -> str:
 
     Every value is checked against a strict pattern, because the installer sources this file.
     """
+    if not _SAFE_VERSION.fullmatch(m.app_version):
+        raise CopyDockError(
+            f"Invalid app version '{m.app_version}'. Use letters, digits, '.', '_' and '-'."
+        )
+    if m.platform not in docker.SUPPORTED_PLATFORMS:
+        raise CopyDockError(
+            f"Unsupported platform '{m.platform}'. Choose one of: "
+            + ", ".join(docker.SUPPORTED_PLATFORMS)
+        )
     for name in m.required_env:
-        if not _CONF_NAME.match(name):
+        if not _CONF_NAME.fullmatch(name):
             raise CopyDockError(f"Setting name '{name}' has characters v1 does not support.")
     for img in m.images:
-        if not _CONF_REF.match(img.reference):
+        if not _CONF_REF.fullmatch(img.reference):
             raise CopyDockError(f"Image name '{img.reference}' has characters v1 does not support.")
     if not re.fullmatch(r"[a-z0-9][a-z0-9_-]*", m.app_name):
         raise CopyDockError(f"Project name '{m.app_name}' must be lowercase letters, digits, - or _.")
@@ -177,6 +186,17 @@ def _make_archive(staging: Path, bundle_dir: str, archive: Path) -> None:
                 tar.addfile(info)
 
 
+def _check_bind_copy(source: Path, root: Path, allow_secret_files: bool) -> None:
+    blocking = [
+        f for f in _bind_findings(source, root)
+        if f.level == "error" or not allow_secret_files
+    ]
+    if blocking:
+        raise CopyDockError(
+            "Bind mount cannot be bundled:\n" + "\n".join(f"  - {f.message}" for f in blocking)
+        )
+
+
 def package_project(
     project: Path,
     compose_name: str | None,
@@ -186,7 +206,7 @@ def package_project(
     allow_secret_files: bool = False,
 ) -> PackageResult:
     project = project.resolve()
-    if not _SAFE_VERSION.match(app_version):
+    if not _SAFE_VERSION.fullmatch(app_version):
         raise CopyDockError(
             f"Invalid --app-version '{app_version}'. Use letters, digits, '.', '_' and '-'."
         )
@@ -230,7 +250,7 @@ def package_project(
     for svc in report.services:
         entry = plan.setdefault(svc.image, {"services": [], "build": None})
         entry["services"].append(svc.name)
-        if svc.build_context:
+        if svc.build_context and entry["build"] is None:
             entry["build"] = config["services"][svc.name]["build"]
 
     images: list[ImageEntry] = []
@@ -284,11 +304,19 @@ def package_project(
                 if not source.exists():
                     raise CopyDockError(f"Bind mount source does not exist: {source}")
                 target = staging / dest
+                # Recheck after image builds, then check the actual copied tree as well.
+                # Preserve any symlink introduced during copying so it can be rejected,
+                # rather than dereferencing it and bundling its target.
+                _check_bind_copy(source, project, allow_secret_files)
                 target.parent.mkdir(parents=True, exist_ok=True)
-                if source.is_dir():
-                    shutil.copytree(source, target)
-                else:
-                    shutil.copy2(source, target)
+                try:
+                    if source.is_dir():
+                        shutil.copytree(source, target, symlinks=True)
+                    else:
+                        shutil.copy2(source, target, follow_symlinks=False)
+                except (OSError, shutil.Error) as exc:
+                    raise CopyDockError(f"Could not copy bind mount {source}: {exc}") from exc
+                _check_bind_copy(target, staging, allow_secret_files)
             compose_text = _COMPOSE_HEADER + yaml.safe_dump(
                 data, sort_keys=False, default_flow_style=False, width=100
             )

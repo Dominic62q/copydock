@@ -155,6 +155,10 @@ def test_bundle_conf_is_sourceable_and_complete(tmp_path):
         {"required_env": ["BAD NAME; rm -rf /"]},
         {"app_name": "Shop; echo hi"},
         {"images": [ImageEntry("x';touch /tmp/pwned;'", ["a"], "s", None, False, 1)]},
+        {"app_version": "1'; touch /tmp/pwned; #"},
+        {"app_version": "1\n"},
+        {"platform": "linux/amd64'; touch /tmp/pwned; #"},
+        {"platform": "windows/amd64"},
     ],
 )
 def test_bundle_conf_rejects_shell_unsafe_values(over):
@@ -173,3 +177,132 @@ def test_installer_help_runs_without_a_bundle():
     out = subprocess.run(["sh", str(INSTALLER), "--help"], capture_output=True, text=True, check=False)
     assert out.returncode == 0
     assert "--check" in out.stdout
+
+
+@pytest.fixture
+def package_case(tmp_path, monkeypatch):
+    from copydock import packager
+
+    project = tmp_path / "project"
+    project.mkdir()
+    (project / "compose.yaml").write_text("services: {}\n")
+    cfg = {"name": "shop", "services": {"web": {"image": "shop:1"}}}
+    monkeypatch.setattr(packager, "load_config", lambda *a: cfg)
+    monkeypatch.setattr(packager.docker, "server_platform", lambda: "linux/amd64")
+    monkeypatch.setattr(packager.docker, "build", lambda *a: None)
+    monkeypatch.setattr(packager.docker, "pull", lambda *a: None)
+    monkeypatch.setattr(packager.docker, "inspect_image", lambda *a: {
+        "Os": "linux", "Architecture": "amd64", "Id": "sha256:test",
+    })
+    monkeypatch.setattr(packager.docker, "save", lambda refs, path, platform: path.write_bytes(b"image"))
+    monkeypatch.setattr(packager.docker, "run", lambda *a: None)
+
+    def package(allow_secrets=False):
+        return packager.package_project(
+            project, None, "linux/amd64", tmp_path / "output", "1", allow_secrets
+        )
+
+    return project, cfg, package
+
+
+def mount(cfg, source):
+    cfg["services"]["web"]["volumes"] = [
+        {"type": "bind", "source": str(source), "target": "/app"}
+    ]
+
+
+@pytest.mark.parametrize("filename", [".env", ".env.production", "tls/server.key", "tls/cert.pem"])
+def test_package_rejects_nested_secrets_unless_explicitly_included(package_case, filename):
+    project, cfg, package = package_case
+    secret = project / filename
+    secret.parent.mkdir(parents=True, exist_ok=True)
+    secret.write_text("private-value")
+    mount(cfg, project)
+    with pytest.raises(CopyDockError, match="secret"):
+        package()
+    result = package(True)
+    with tarfile.open(result.archive) as tar:
+        member = f"shop-1-linux-amd64/files/{filename}"
+        assert tar.extractfile(member).read() == b"private-value"
+
+
+@pytest.mark.parametrize("kind", ["file", "directory", "dangling", "cycle"])
+def test_package_rejects_symlinks_even_with_secret_override(package_case, kind):
+    project, cfg, package = package_case
+    outside = project.parent / "outside"
+    if kind == "file":
+        outside.write_text("outside-private-value")
+    elif kind == "directory":
+        outside.mkdir()
+        (outside / "private").write_text("outside-private-value")
+    elif kind == "cycle":
+        outside = project
+    (project / "link").symlink_to(outside, target_is_directory=kind in ("directory", "cycle"))
+    mount(cfg, project)
+    with pytest.raises(CopyDockError, match="[Ss]ymlink"):
+        package(True)
+
+
+def test_package_rejects_conflicting_builds_for_shared_image(package_case):
+    project, cfg, package = package_case
+    cfg["services"]["web"]["build"] = {"context": str(project), "dockerfile": "First"}
+    cfg["services"]["worker"] = {
+        "image": "shop:1", "build": {"context": str(project), "dockerfile": "Second"},
+    }
+    with pytest.raises(CopyDockError, match="shop:1"):
+        package()
+
+
+def test_package_allows_identical_builds_for_shared_image(package_case):
+    project, cfg, package = package_case
+    build = {"context": str(project)}
+    cfg["services"]["web"]["build"] = build
+    cfg["services"]["worker"] = {"image": "shop:1", "build": dict(build)}
+    result = package()
+    assert result.manifest.images[0].services == ["web", "worker"]
+
+
+@pytest.mark.parametrize("reverse", [False, True])
+@pytest.mark.parametrize("kind", ["file", "directory"])
+def test_overlapping_mounts_fail_cleanly_in_cli(package_case, reverse, kind):
+    from typer.testing import CliRunner
+
+    from copydock.cli import app
+
+    project, cfg, _ = package_case
+    nested = project / "nested"
+    if kind == "directory":
+        nested.mkdir()
+    else:
+        nested.write_text("data")
+    sources = [project, nested]
+    if reverse:
+        sources.reverse()
+    cfg["services"]["web"]["volumes"] = [
+        {"type": "bind", "source": str(source), "target": f"/mount{i}"}
+        for i, source in enumerate(sources)
+    ]
+    result = CliRunner().invoke(app, ["package", str(project)])
+    assert result.exit_code == 1
+    assert "overlap" in result.output.lower()
+    assert "Traceback" not in result.output
+    assert isinstance(result.exception, SystemExit)
+
+
+@pytest.mark.parametrize("unsafe", ["secret", "symlink"])
+def test_package_rechecks_mounts_after_image_builds(package_case, monkeypatch, unsafe):
+    from copydock import packager
+
+    project, cfg, package = package_case
+    mount(cfg, project)
+    cfg["services"]["web"]["build"] = {"context": str(project)}
+
+    def build(*args):
+        if unsafe == "secret":
+            (project / ".env").write_text("late-private-value")
+        else:
+            (project / "link").symlink_to(project)
+
+    monkeypatch.setattr(packager.docker, "build", build)
+    with pytest.raises(CopyDockError):
+        package()
