@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "copydock"
-version = "0.1.0"
+version = "0.1.1"
 description = "Package a Docker Compose app into a portable bundle you can install on any Linux server, online or offline."
 readme = "README.md"
 requires-python = ">=3.10"

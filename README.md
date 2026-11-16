@@ -3,7 +3,7 @@
 Package a Docker Compose app into one bundle, copy it to a Linux server, and install it with a
 single script. The server needs only Docker. It does not need internet, Python or CopyDock.
 
-> **Status: alpha (0.1.0).** The full flow is tested on the included sample app (frontend, API,
+> **Status: alpha (0.1.1).** The full flow is tested on the included sample app (frontend, API,
 > PostgreSQL, Caddy), including an install in a Docker daemon with no network. It has not yet been
 > tested on a wide range of real servers or on a real ARM server. Try it on a test machine first.
 
